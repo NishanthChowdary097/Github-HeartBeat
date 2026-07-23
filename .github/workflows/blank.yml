@@ -1,36 +1,104 @@
-# This is a basic workflow to help you get started with Actions
+name: Random Timestamp Update
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-
-  # Allows you to run this workflow manually from the Actions tab
+  schedule:
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+permissions:
+  contents: write
+
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
+  update:
     runs-on: ubuntu-latest
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v4
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Generate schedule and update
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          python << 'EOF'
+          import json
+          import os
+          import random
+          import subprocess
+          from datetime import datetime, timezone
+
+          # --------------------
+          # Configuration
+          # --------------------
+          MIN_UPDATES = 3
+          MAX_UPDATES = 12
+
+          STATE_FILE = ".github/state.json"
+          TIMESTAMP_FILE = "last-pushed.txt"
+
+          now = datetime.now(timezone.utc)
+          today = now.strftime("%Y-%m-%d")
+
+          # 96 slots/day (15 minutes each)
+          current_slot = now.hour * 4 + now.minute // 15
+
+          # --------------------
+          # Load state
+          # --------------------
+          if os.path.exists(STATE_FILE):
+              with open(STATE_FILE) as f:
+                  state = json.load(f)
+          else:
+              state = {}
+
+          # --------------------
+          # New day -> create schedule
+          # --------------------
+          if state.get("date") != today:
+              updates = random.randint(MIN_UPDATES, MAX_UPDATES)
+
+              slots = sorted(random.sample(range(96), updates))
+
+              state = {
+                  "date": today,
+                  "slots": slots,
+                  "completed": []
+              }
+
+              print("Today's schedule:", slots)
+
+          changed = False
+
+          # --------------------
+          # Should update now?
+          # --------------------
+          if (
+              current_slot in state["slots"]
+              and current_slot not in state["completed"]
+          ):
+              with open(TIMESTAMP_FILE, "w") as f:
+                  f.write(now.strftime("%Y-%m-%d %H:%M:%S UTC\n"))
+
+              state["completed"].append(current_slot)
+              state["completed"].sort()
+
+              changed = True
+
+          # Always save state
+          os.makedirs(".github", exist_ok=True)
+          with open(STATE_FILE, "w") as f:
+              json.dump(state, f, indent=2)
+
+          subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
+          subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
+
+          subprocess.run(["git", "add", STATE_FILE, TIMESTAMP_FILE], check=False)
+
+          result = subprocess.run(["git", "diff", "--cached", "--quiet"])
+
+          if result.returncode != 0:
+              if changed:
+                  msg = "Update timestamp"
+              else:
+                  msg = "Generate daily schedule"
+
+              subprocess.run(["git", "commit", "-m", msg], check=True)
+              subprocess.run(["git", "push"], check=True)
+          EOF
